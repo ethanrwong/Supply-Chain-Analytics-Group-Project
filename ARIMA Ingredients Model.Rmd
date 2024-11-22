@@ -1,0 +1,202 @@
+---
+title: "ARIMA Ingredients Model"
+author: "Ethan Wong"
+date: "2024-11-22"
+output: html_document
+---
+
+### Reading in Libraries and Data
+
+```{r message=FALSE, warning=FALSE}
+# Load Libraries
+library(fable)
+library(fpp3)
+library(tseries)
+library(tsibble)
+library(forecast)
+library(ggplot2)
+library(dplyr)
+
+# Load Data
+data <- read.csv("data_formatted.csv")
+
+# Convert Data into a tsibble
+data_tsibble <- data %>%
+  mutate(Date = as.Date(Date, format = "%Y-%m-%d")) %>%
+  as_tsibble(index = Date, key = Ingredient)
+```
+
+### Checking for Stationarity
+
+```{r message=FALSE, warning=FALSE}
+# Add first and second differences
+data_diff <- data_tsibble %>%
+  mutate(diff_1 = difference(Sales_Units),
+         diff_2 = difference(diff_1))
+
+# Plot the time series for each ingredient
+data_tsibble %>%
+  autoplot(Sales_Units) +
+  ggtitle("Time Series of Sales for Each Ingredient") +
+  xlab("Date") +
+  ylab("Sales Units") +
+  facet_wrap(~ Ingredient, scales = "free_y")
+
+# Plot first and second differences
+data_diff %>%
+  autoplot(diff_1) +
+  ggtitle("First Difference of Sales Units") +
+  xlab("Date") +
+  ylab("First Difference") +
+  facet_wrap(~ Ingredient, scales = "free_y")
+
+data_diff %>%
+  autoplot(diff_2) +
+  ggtitle("Second Difference of Sales Units") +
+  xlab("Date") +
+  ylab("Second Difference") +
+  facet_wrap(~ Ingredient, scales = "free_y")
+```
+
+Based on these three plots, it seems unlikely that differencing is needed to achieve stationarity. However, we can confirm this with a KPSS test.
+
+```{r}
+# Perform KPSS test on the original series, first, and second differences
+data_tsibble %>%
+  features(Sales_Units, unitroot_kpss)
+
+data_diff %>%
+  features(diff_1, unitroot_kpss)
+
+data_diff %>%
+  features(diff_2, unitroot_kpss)
+```
+
+For the KPSS test, the null hypothesis is that the series is stationary. Since we have p-values > 0.05 for shrimp and steak on the original series, we cannot reject stationarity. However, for tomato, there is a possibility of non-stationarity. We can also check with an ADF test. 
+
+```{r message=FALSE, warning=FALSE}
+# Perform ADF test for each ingredient on original series, first difference, and second difference
+adf_results <- data_diff %>%
+  group_by(Ingredient) %>%
+  group_modify(~ {
+    # ADF test on original series
+    adf_original <- adf.test(.x$Sales_Units, alternative = "stationary")
+    
+    # ADF test on first difference
+    adf_diff_1 <- adf.test(na.omit(.x$diff_1), alternative = "stationary")
+    
+    # ADF test on second difference
+    adf_diff_2 <- adf.test(na.omit(.x$diff_2), alternative = "stationary")
+    
+    # Return results as a tibble
+    tibble(
+      adf_p_value_original = adf_original$p.value,
+      adf_p_value_diff_1 = adf_diff_1$p.value,
+      adf_p_value_diff_2 = adf_diff_2$p.value
+    )
+  })
+
+print(adf_results)
+```
+
+For the ADF test, the null hypothesis is that the series is not stationary. Since the p-values are < 0.05, we can reject the null hypothesis, even at the original series level. It is safe to say that differencing is likely not needed for steak and shrimp and that the original series for those is stationary. However, since the KPSS and ADF results disagree for tomato, the auto.arima() function may use d = 1 for that series.
+
+### Determining Order of Appropriate ARIMA Models
+
+Here, we examine the ACF and PACF in order to determine what order of ARIMA models may be appropriate.
+
+```{r}
+# Plot ACF and PACF for each ingredient
+data_tsibble %>%
+  filter(Ingredient == "Shrimp") %>%
+  gg_tsdisplay(Sales_Units, plot_type = "partial") +
+  ggtitle("ACF and PACF for Shrimp Sales Units")
+
+data_tsibble %>%
+  filter(Ingredient == "Steak") %>%
+  gg_tsdisplay(Sales_Units, plot_type = "partial") +
+  ggtitle("ACF and PACF for Steak Sales Units")
+
+data_tsibble %>%
+  filter(Ingredient == "Tomato") %>%
+  gg_tsdisplay(Sales_Units, plot_type = "partial") +
+  ggtitle("ACF and PACF for Tomato Sales Units")
+
+```
+
+Based on these three sets of plots, it seems that all three ingredients show strong weekly seasonality in their sales data, indicated by the periodic spikes at multiples of 7 in the ACF plots. Significant spikes at lag 1 in the PACF plots across all three ingredients indicate that an AR(1) component should be included in the models. We hypothesize the following model fits for each ingredient:
+
+* Shrimp: SARIMA(p=1, d=0, q=0)(P=1, D=0, Q=0)[7]
+* Steak: SARIMA(p=1, d=0, q=0)(P=1, D=0, Q=0)[7]
+* Tomato: SARIMA(p=1, d=1, q=0)(P=1, D=1, Q=0)[7]
+
+### Fitting SARIMA Models
+
+Due to the inherent seasonality that appears to be weekly, we will now use auto.arima() to fit models for Shrimp, Steak and Tomato. We will also manually fit our hypothesized ARIMA configurations for these three ingredients for comparison.  
+
+```{r}
+# Fit auto.arima for each ingredient
+ingredients <- unique(data_tsibble$Ingredient)
+
+models <- list()
+
+for (ingredient in ingredients) {
+  # Filter the data for the specific ingredient
+  ingredient_data <- data_tsibble %>%
+    filter(Ingredient == ingredient) %>%
+    as_tsibble(index = Date)
+  
+  # Convert to time series object for auto.arima
+  ts_data <- ts(ingredient_data$Sales_Units, frequency = 7) # Weekly seasonality
+  
+  # Fit seasonal ARIMA model
+  model <- auto.arima(ts_data, seasonal = TRUE, stepwise = FALSE, approximation = FALSE)
+  
+  # Store the model in a list
+  models[[ingredient]] <- model
+  
+  # Print model summary
+  cat(paste("Seasonal ARIMA model for", ingredient, ":\n"))
+  print(model)
+  cat("\n")
+}
+```
+
+```{r}
+# Fit SARIMA model for Shrimp
+model_shrimp <- data_tsibble %>%
+  filter(Ingredient == "Shrimp") %>%
+  model(SARIMA = ARIMA(Sales_Units ~ 0 + pdq(1,0,0) + PDQ(1,0,0)))
+
+# Fit SARIMA model for Steak
+model_steak <- data_tsibble %>%
+  filter(Ingredient == "Steak") %>%
+  model(SARIMA = ARIMA(Sales_Units ~ 0 + pdq(1,0,0) + PDQ(1,0,0)))
+
+# Fit SARIMA model for Tomato
+model_tomato <- data_tsibble %>%
+  filter(Ingredient == "Tomato") %>%
+  model(SARIMA = ARIMA(Sales_Units ~ 0 + pdq(1,1,0) + PDQ(1,1,0)))
+
+model_shrimp %>% report()
+model_steak %>% report()
+model_tomato %>% report()
+```
+When comparing the auto.arima() to the manually fitted ARIMA models, the auto fitted models perform better in terms of AIC, AICc, and BIC along with residual variance (sigma^2). The models selected by auto.arima() are:
+
+* Shrimp: SARIMA(3,0,0)(2,1,0)[7]
+* Steak: SARIMA(0,0,0)(2,1,0)[7]
+* Tomato: SARIMA(0,0,0)(0,1,1)[7]
+
+While these are more complex and harder to interpret as far as coefficients go, they are a better fit and have better explanatory power. 
+
+### Residual Analysis
+
+Next, we will perform a residual analysis to validate assumptions of independence...
+
+### Cross-Validation of Candidate Models
+
+
+### Forecasting
+
+
