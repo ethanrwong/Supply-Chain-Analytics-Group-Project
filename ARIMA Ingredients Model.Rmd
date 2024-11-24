@@ -1,7 +1,7 @@
 ---
 title: "ARIMA Ingredients Model"
 author: "Ethan Wong"
-date: "2024-11-22"
+date: "2024-11-24"
 output: html_document
 ---
 
@@ -16,6 +16,9 @@ library(tsibble)
 library(forecast)
 library(ggplot2)
 library(dplyr)
+library(lubridate)
+library(tibble)
+library(patchwork)
 
 # Load Data
 data <- read.csv("data_formatted.csv")
@@ -222,7 +225,7 @@ model_shrimp %>% gg_tsresiduals()
 model_steak %>% gg_tsresiduals()
 model_tomato %>% gg_tsresiduals()
 ```
-Analysis TBA...
+Based on these residual outputs, we see small spikes in ACF at seasonal lags (7, 14, etc.) suggest that the weekly seasonality might not be fully captured in the models for shrimp and steak. All three models to show extreme residuals, which could be due to a systematic effect the models are not capturing. However, these residuals are all approximately symmetric (though heavy tails exist for shrimp and steak).
 
 Next, we examine the information criteria for the models under consideration.
 
@@ -231,15 +234,160 @@ glance(model_shrimp)
 glance(model_steak)
 glance(model_tomato)
 ```
-Analysis TBA...
+Based on these results, it seems that the Shrimp model has the lowest AIC and BIC among the candidate models, with tomato having significantly higher AIC/BIC due to higher variance (sigma^2). 
 
 ### Cross-Validation of Candidate Models:
 
+To cross-validate a time-series forecasting model, we need to extend the file to repeatedly fit the model. We start by assuming that the initial data consists of 70% of the data in the code below. Then in a sequential fashion, we recalculate the model assuming seven additional points (datums) are observed. Finally we can calculate the out-of-sample accuracy metrics by comparing each forecast in the horizon with the available data.
+
+```{r warning=FALSE}
+# Initialize an empty tibble to store accuracy metrics
+all_accuracy_metrics <- tibble()
+
+# Define a function to calculate accuracy for a given ingredient
+calculate_accuracy <- function(data, ingredient, auto_formula, manual_formula) {
+  # Filter the data for the specific ingredient
+  ingredient_data <- data %>%
+    filter(Ingredient == !!ingredient)
+  
+  # Stretch tsibble for cross-validation
+  cv_data <- ingredient_data %>%
+    stretch_tsibble(.init = 426, .step = 7)
+  
+  # Fit the models
+  cv_models <- cv_data %>%
+    model(
+      AutoSARIMA = ARIMA(auto_formula),
+      ManualSARIMA = ARIMA(manual_formula)
+    )
+  
+  # Forecast and compute accuracy
+  cv_forecasts <- cv_models %>%
+    forecast(h = 14)
+  
+  # Compute accuracy and add the ingredient as a column
+  cv_forecasts %>%
+    accuracy(ingredient_data) %>%
+    mutate(Ingredient = !!ingredient) %>%
+    return()
+}
+
+# Add results for Shrimp
+all_accuracy_metrics <- bind_rows(
+  all_accuracy_metrics,
+  calculate_accuracy(
+    data_tsibble, "Shrimp",
+    auto_formula = Sales_Units ~ pdq(3, 0, 0) + PDQ(2, 1, 0),
+    manual_formula = Sales_Units ~ pdq(1, 0, 0) + PDQ(1, 0, 0)
+  )
+)
+
+# Add results for Steak
+all_accuracy_metrics <- bind_rows(
+  all_accuracy_metrics,
+  calculate_accuracy(
+    data_tsibble, "Steak",
+    auto_formula = Sales_Units ~ pdq(0, 0, 0) + PDQ(2, 1, 0),
+    manual_formula = Sales_Units ~ pdq(1, 0, 0) + PDQ(1, 0, 0)
+  )
+)
+
+# Add results for Tomato
+all_accuracy_metrics <- bind_rows(
+  all_accuracy_metrics,
+  calculate_accuracy(
+    data_tsibble, "Tomato",
+    auto_formula = Sales_Units ~ pdq(0, 0, 0) + PDQ(0, 1, 1),
+    manual_formula = Sales_Units ~ pdq(1, 1, 0) + PDQ(1, 1, 0)
+  )
+)
+
+print(all_accuracy_metrics)
+```
+
+As expected, the models selected by Auto ARIMA have lower RMSE and MAE across all ingredients, confirming better predictive accuracy. MPE/MAPE is Inf/NAN for several models due to the 0 values on Sundays. ACF1 values (autocorrelation of residuals at lag 1) are close to zero for all models in Shrimp and Steak, indicating minimal autocorrelation in residuals. Interestingly, tomato shows higher ACF1 for the Manual ARIMA model we hypothesized (0.409), suggesting significant residual autocorrelation and potential model misspecification.
+
+Below, we do a comparison of RMSE for each model and ingredient. 
+
+```{r}
+# Plot RMSE for each ingredient and model
+ggplot(all_accuracy_metrics, aes(x = Ingredient, y = RMSE, fill = .model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "RMSE Comparison of AutoSARIMA and ManualSARIMA Models",
+    x = "Ingredient",
+    y = "RMSE",
+    fill = "Model"
+  ) +
+  theme_minimal()
+```
+From the above graph, we see that the Auto ARIMA models perform slightly better than the manual, hypothesized ARIMA models for steak and shrimp. However, this improvement is much more dramatic for the Tomato Auto ARIMA model compared to the Tomato Manual ARIMA model. Tomato sales in general were more volatile, so this is to be expected.
+
+Lastly, we look at the forecast plots of the Auto ARIMA and Manual ARIMA plots below.
+
+```{r warning=FALSE}
+# Generate forecasts for Shrimp
+shrimp_forecast <- data_tsibble %>%
+  filter(Ingredient == "Shrimp") %>%
+  model(
+    AutoSARIMA = ARIMA(Sales_Units ~ pdq(3,0,0) + PDQ(2,1,0)),
+    ManualSARIMA = ARIMA(Sales_Units ~ pdq(1,0,0) + PDQ(1,0,0))
+  ) %>%
+  forecast(h = 14)
+
+# Generate forecasts for Steak
+steak_forecast <- data_tsibble %>%
+  filter(Ingredient == "Steak") %>%
+  model(
+    AutoSARIMA = ARIMA(Sales_Units ~ pdq(0,0,0) + PDQ(2,1,0)),
+    ManualSARIMA = ARIMA(Sales_Units ~ pdq(1,0,0) + PDQ(1,0,0))
+  ) %>%
+  forecast(h = 14)
+
+# Generate forecasts for Tomato
+tomato_forecast <- data_tsibble %>%
+  filter(Ingredient == "Tomato") %>%
+  model(
+    AutoSARIMA = ARIMA(Sales_Units ~ pdq(0,0,0) + PDQ(0,1,1)),
+    ManualSARIMA = ARIMA(Sales_Units ~ pdq(1,1,0) + PDQ(1,1,0))
+  ) %>%
+  forecast(h = 14)
+
+# Shrimp forecast plot
+shrimp_plot <- autoplot(shrimp_forecast, data = data_tsibble %>% filter(Ingredient == "Shrimp")) +
+  labs(title = "Forecast for Shrimp Sales Units", x = "Date", y = "Sales Units") +
+  theme_minimal() +
+  xlim(as.Date("2024-08-15"), as.Date("2024-09-15")) # Adjust to forecast range
+
+# Steak forecast plot
+steak_plot <- autoplot(steak_forecast, data = data_tsibble %>% filter(Ingredient == "Steak")) +
+  labs(title = "Forecast for Steak Sales Units", x = "Date", y = "Sales Units") +
+  theme_minimal() +
+  xlim(as.Date("2024-08-15"), as.Date("2024-09-15"))
+
+# Tomato forecast plot
+tomato_plot <- autoplot(tomato_forecast, data = data_tsibble %>% filter(Ingredient == "Tomato")) +
+  labs(title = "Forecast for Tomato Sales Units", x = "Date", y = "Sales Units") +
+  theme_minimal() +
+  xlim(as.Date("2024-08-15"), as.Date("2024-09-15"))
+
+shrimp_plot <- shrimp_plot +
+  theme(legend.position = "bottom") # Moves legend below the plot
+
+steak_plot <- steak_plot +
+  theme(legend.position = "bottom") # Moves legend below the plot
+
+tomato_plot <- tomato_plot +
+  theme(legend.position = "bottom") # Moves legend below the plot
+```
+
+```{r warning=FALSE}
+shrimp_plot
+steak_plot
+tomato_plot
+```
 
 
-### Editor Notes:
+For shrimp, the Auto ARIMA shows tighter confidence intervals, indicating higher certainty compared to the Manual ARIMA model. The same can be said for the steak model, as the Auto ARIMA model has smoother predictions. Lastly, despite the uncertainty in tomato sales, the Auto ARIMA model still shows tighter confidence intervals, indicating a better model fit. 
 
-1. Make code for Residual and Information Criteria Analysis more dynamic. 
-2. Concerning ACF plots for model residuals - need to double check this
-3. Finish code for Cross Validation of Candidate Models
-3. Would performance improve if looking on a weekly basis? Driving idea is if 0s are hindering model performance, aggregating eliminates the 0s. However, the day of the week seasonality might be less pronounced. 
+Overall, tomato sales are the most challenging to model, likely due to higher variability or unique seasonal patterns. However, the ARIMA model performs very well for modeling and forecasting the sales of these ingredients, and the performance could be further evaluated with comparable data for the forecast period along with more historical data. We also considered aggregating the data for each week for each ingredient and fitting ARIMA models this way. However, the results were determined to be white noise by ARIMA and thus, unsuitable for any sort of forecasting usage.  
