@@ -390,4 +390,80 @@ tomato_plot
 
 For shrimp, the Auto ARIMA shows tighter confidence intervals, indicating higher certainty compared to the Manual ARIMA model. The same can be said for the steak model, as the Auto ARIMA model has smoother predictions. Lastly, despite the uncertainty in tomato sales, the Auto ARIMA model still shows tighter confidence intervals, indicating a better model fit. 
 
-Overall, tomato sales are the most challenging to model, likely due to higher variability or unique seasonal patterns. However, the ARIMA model performs very well for modeling and forecasting the sales of these ingredients, and the performance could be further evaluated with comparable data for the forecast period along with more historical data. We also considered aggregating the data for each week for each ingredient and fitting ARIMA models this way. However, the results were determined to be white noise by ARIMA and thus, unsuitable for any sort of forecasting usage.  
+Overall, tomato sales are the most challenging to model, likely due to higher variability or unique seasonal patterns. However, the ARIMA model performs very well for modeling and forecasting the sales of these ingredients, and the performance could be further evaluated with comparable data for the forecast period along with more historical data. We also considered aggregating the data for each week for each ingredient and fitting ARIMA models this way. However, the results were determined to be white noise by ARIMA and thus, unsuitable for any sort of forecasting usage.
+
+### Comparing ARIMA to Naive Seasonal Forecasting
+
+```{r warning=FALSE}
+# Define a function to compare AutoSARIMA with Naive Seasonal Forecasting
+compare_models_with_accuracy <- function(data, ingredient, auto_formula) {
+  # Filter data for the specific ingredient
+  ingredient_data <- data %>%
+    filter(Ingredient == !!ingredient)
+  
+  # Use stretch_tsibble for time-series cross-validation
+  cv_data <- ingredient_data %>%
+    stretch_tsibble(.init = 426, .step = 7)
+  
+  # Fit Auto SARIMA model and Seasonal Naive model
+  cv_models <- cv_data %>%
+    model(
+      AutoSARIMA = ARIMA(auto_formula),
+      SeasonalNaive = SNAIVE(Sales_Units ~ lag("week"))
+    )
+  
+  # Generate forecasts for both models
+  cv_forecasts <- cv_models %>%
+    forecast(h = 14)
+  
+  # Align actual data and compute accuracy
+  accuracy_metrics <- cv_forecasts %>%
+    accuracy(ingredient_data) %>%
+    mutate(Ingredient = !!ingredient)
+  
+  return(list(forecasts = cv_forecasts, accuracy = accuracy_metrics))
+}
+
+# Initialize lists to store results for all ingredients
+all_forecasts <- list()
+all_accuracy_metrics <- tibble()
+
+# Compare models for Shrimp
+shrimp_results <- compare_models_with_accuracy(
+  data_tsibble, "Shrimp",
+  auto_formula = Sales_Units ~ pdq(3, 0, 0) + PDQ(2, 1, 0)
+)
+all_forecasts$Shrimp <- shrimp_results$forecasts
+all_accuracy_metrics <- bind_rows(all_accuracy_metrics, shrimp_results$accuracy)
+
+# Compare models for Steak
+steak_results <- compare_models_with_accuracy(
+  data_tsibble, "Steak",
+  auto_formula = Sales_Units ~ pdq(0, 0, 0) + PDQ(2, 1, 0)
+)
+all_forecasts$Steak <- steak_results$forecasts
+all_accuracy_metrics <- bind_rows(all_accuracy_metrics, steak_results$accuracy)
+
+# Compare models for Tomato
+tomato_results <- compare_models_with_accuracy(
+  data_tsibble, "Tomato",
+  auto_formula = Sales_Units ~ pdq(0, 0, 0) + PDQ(0, 1, 1)
+)
+all_forecasts$Tomato <- tomato_results$forecasts
+all_accuracy_metrics <- bind_rows(all_accuracy_metrics, tomato_results$accuracy)
+
+# Print accuracy metrics
+print(all_accuracy_metrics)
+
+# Plot RMSE for each ingredient and model
+ggplot(all_accuracy_metrics, aes(x = Ingredient, y = RMSE, fill = .model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "RMSE Comparison of AutoSARIMA and Naive Seasonal Models",
+    x = "Ingredient",
+    y = "RMSE",
+    fill = "Model"
+  ) +
+  theme_minimal()
+```
+The comparison of AutoSARIMA and Seasonal Naive models reveals that AutoSARIMA consistently outperforms the Seasonal Naive approach across all ingredients in terms of RMSE and MAE. For shrimp, AutoSARIMA achieves an RMSE of 4.4 compared to 5.1 for Seasonal Naive, indicating better accuracy in capturing patterns. Similarly, for steak, AutoSARIMA exhibits an RMSE of 4.66 versus 5.33 for Seasonal Naive. The most significant difference appears in tomato, where AutoSARIMA reduces the RMSE from 43.93 (Seasonal Naive) to 34.01, demonstrating its superior ability to handle the high variance and complex seasonality of tomato sales. Despite Seasonal Naive's simplicity, its higher RMSE and MAE suggest that it struggles to account for intricate seasonal and autoregressive patterns, especially for volatile series like tomato. Overall, AutoSARIMA offers a more robust and reliable forecasting method for all three ingredients, capturing trends and seasonality more effectively.
