@@ -1,0 +1,100 @@
+---
+title: 'Supply Chain Analytics: Final Project (Exponential Smoothing)'
+author: "Supply Chain Analytics Group"
+date: "2024-12-06"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+# Load necessary libraries
+library(fpp3)
+library(tidyverse)
+library(lubridate)
+```
+
+
+```{r data, echo=FALSE}
+# Load the data
+data <- read_csv("file_path")
+
+# Convert to a tsibble
+data_ts <- data %>%
+  mutate(Date = as.Date(Date, format = "%m/%d/%Y")) %>%
+  select(Date, Shrimp, Steak, Tomato) %>%
+  pivot_longer(cols = c(Shrimp, Steak, Tomato), names_to = "Item", values_to = "Sales") %>%
+  as_tsibble(index = Date, key = Item)
+
+# Plot the data to visualize the sales trends
+data_ts %>%
+  autoplot(Sales) +
+  ggtitle("Sales Trends for Shrimp, Steak, and Tomato") +
+  xlab("Date") +
+  ylab("Sales")
+```
+
+
+```{r model, echo=FALSE}
+# Calculate the split date based on unique dates
+unique_dates <- unique(data_ts$Date)
+split_index <- round(0.9 * length(unique_dates))
+split_date <- unique_dates[split_index]
+
+# Split the data into training and test sets
+train_data <- data_ts %>%
+  filter(Date <= split_date)
+
+test_data <- data_ts %>%
+  filter(Date > split_date)
+
+# Ensure train and test data are tsibbles
+print(is_tsibble(train_data))
+print(is_tsibble(test_data))
+
+# Fit ETS models on the training set
+sales_ets_model <- train_data %>%
+  model(m.auto = ETS(Sales))
+
+sales_ets_model
+
+# Forecast for the test period using horizon
+forecast_horizon <- nrow(test_data) / length(unique(test_data$Item))
+
+forecasts <- sales_ets_model %>%
+  forecast(h = forecast_horizon)
+
+# Calculate accuracy metrics
+accuracy_metrics <- accuracy(forecasts, test_data)
+
+# Display accuracy metrics
+print(accuracy_metrics)
+
+# Filter forecasts and test data for the test period only
+forecasts_filtered <- forecasts %>%
+  filter(Date > split_date)
+
+test_data_filtered <- test_data %>%
+  filter(Date > split_date)
+
+# Plot forecasts vs actuals for the test period only
+forecasts_filtered %>%
+  autoplot(test_data_filtered, level = NULL) +
+  ggtitle("Forecast vs Actuals (Test Period Only)") +
+  xlab("Date") +
+  ylab("Sales") +
+  theme_minimal()
+```
+```{r residuals, echo=FALSE}
+# Check residuals for the automatic model
+residuals <- sales_ets_model %>%
+  residuals()
+
+# Create a plot for residuals for each item separately
+residuals %>%
+  ggplot(aes(x = Date, y = .resid)) +
+  geom_line() +
+  facet_wrap(~Item, scales = "free_y") +
+  ggtitle("Residuals of ETS Model by Item") +
+  xlab("Date") +
+  ylab("Residuals") +
+  theme_minimal()
+```
