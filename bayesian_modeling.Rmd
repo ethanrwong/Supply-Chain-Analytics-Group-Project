@@ -1,0 +1,578 @@
+---
+title: "Bayesian Modeling"
+output: html_document
+date: "2024-12-10"
+---
+
+```{r message=FALSE, warning=FALSE}
+library(rstan)
+library(forecast)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+
+```
+
+```{r}
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+```
+
+```{r}
+df <- read.csv("Supply Chain Final Project Data.csv")
+```
+
+```{r}
+# rename columns
+colnames(df) <- c("Date", "DayOfWeek", "ShrimpSales", "SteakSales", "TomatoSales")
+```
+
+```{r}
+# convert columns
+df$Date <- as.Date(df$Date, format = "%m/%d/%Y")
+df$DayOfWeek <- as.numeric(factor(df$DayOfWeek, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")))
+```
+
+```{r}
+# sort data by date
+df <- df[order(df$Date),]
+```
+
+```{r}
+# split data into training and validation sets
+set.seed(123)  
+train_size <- floor(0.8 * nrow(df)) 
+train_df <- df[1:train_size, ]
+val_df <- df[(train_size + 1):nrow(df), ]
+
+dow_train <- train_df$DayOfWeek
+dow_val <- val_df$DayOfWeek
+
+N_train <- nrow(train_df)
+N_val <- nrow(val_df)
+```
+
+```{r}
+# set global variables
+seasonality_period <- 365.25  # annual seasonality for Fourier terms
+S <- 5                        # num fourier terms
+season <- 7                   # weekly seasonality for naive forecast
+stan_model_path <- "bayesian_modeling.stan"  # stan model path
+```
+
+```{r}
+# create time indices
+t_train <- 1:N_train
+t_val <- (N_train + 1):(N_train + N_val)
+
+# scale time indices
+t_train_scaled <- (t_train - mean(t_train)) / sd(t_train)
+t_val_scaled <- (t_val - mean(t_train)) / sd(t_train)
+
+```
+
+```{r}
+# generate Fourier terms for training and validation
+fourier_train <- fourier(ts(1:N_train, frequency = seasonality_period), K = S)
+fourier_val <- fourier(ts(1:N_val, frequency = seasonality_period), K = S)
+```
+
+# SHRIMP
+
+## Bayesian Forecasting
+
+```{r}
+# get shrimp column to fit 
+sales_col <- "ShrimpSales"
+
+# get training and validation set for shrimp column only
+y_train <- train_df[[sales_col]]
+y_val <- val_df[[sales_col]]
+
+```
+
+```{r}
+# prepare data to fit the stan model
+stan_data_train <- list(
+  N = N_train,
+  N_forecast = N_val,
+  K_dow = 7,
+  dow = dow_train,
+  dow_forecast = dow_val,
+  y = y_train,
+  t = t_train_scaled,
+  t_forecast = t_val_scaled,
+  S = S,
+  fourier_terms = as.matrix(fourier_train),
+  fourier_terms_forecast = as.matrix(fourier_val)
+)
+```
+
+```{r, include=FALSE}
+
+fit <- stan(
+  file = stan_model_path,
+  data = stan_data_train,
+  iter = 4000,
+  chains = 4,
+  seed = 123,
+  verbose = TRUE
+)
+
+```
+
+```{r}
+# get posterior samples
+posterior <- rstan::extract(fit)
+
+# get predictions for validation set
+y_pred <- posterior$y_pred  
+
+```
+
+```{r}
+#  summarize the predictions
+val_mean <- apply(y_pred, 2, mean)
+val_sd <- apply(y_pred, 2, sd)
+val_intervals <- apply(y_pred, 2, quantile, probs = c(0.025, 0.975))
+
+```
+
+```{r}
+val_df <- val_df %>%
+  mutate(
+    Predicted = val_mean,
+    Lower_95_CI = val_intervals[1, ],
+    Upper_95_CI = val_intervals[2, ],
+    Error = Predicted - !!sym(sales_col),
+    Absolute_Error = abs(Error),
+    Squared_Error = Error^2
+  )
+
+```
+
+## Validation Metrics
+
+```{r}
+# validation metrics
+mae_shrimp <- mean(val_df$Absolute_Error)
+rmse_shrimp <- sqrt(mean(val_df$Squared_Error))
+
+
+cat("Validation MAE Shrimp:", mae_shrimp, "\n")
+cat("Validation RMSE Shrimp:", rmse_shrimp, "\n")
+
+```
+
+## Bayesian Forecast
+
+```{r}
+
+# observed data for last 30 days for plot
+observed_data <- train_df %>%
+  slice_tail(n = 30) %>%
+  mutate(
+    Type = "Observed",
+    Predicted = !!sym("ShrimpSales"),
+    Lower_95_CI = NA,
+    Upper_95_CI = NA
+  )
+
+# get posterior pred summaries
+val_mean <- apply(y_pred, 2, mean)
+val_intervals <- apply(y_pred, 2, quantile, probs = c(0.025, 0.975))
+
+# df of predictions
+predicted_data <- tibble(
+  Date = val_df$Date[1:10], 
+  Type = "Predicted",
+  Predicted = val_mean[1:10],  # first 10 only
+  Lower_95_CI = val_intervals[1, 1:10],  #ci lb
+  Upper_95_CI = val_intervals[2, 1:10]   #ci ub
+)
+
+
+combined_data <- bind_rows(observed_data, predicted_data)
+
+# plot observed data and predicted data with confidence intervals 
+ggplot(combined_data, aes(x = Date)) +
+  geom_line(aes(y = Predicted, color = Type)) +  
+  geom_ribbon(
+    data = filter(combined_data, Type == "Predicted"),
+    aes(ymin = Lower_95_CI, ymax = Upper_95_CI),
+    fill = "red", alpha = 0.2
+  ) +
+  labs(
+    title = "Forecast for Shrimp Sales Units",
+    x = "Date",
+    y = "Sales Units"
+  ) +
+  scale_color_manual(
+    values = c("Observed" = "black", "Predicted" = "blue"),
+    breaks = c("Observed", "Predicted")
+  ) +
+  theme_minimal()
+
+```
+
+## Naive Forecasting
+
+```{r}
+
+naive_forecast <- train_df[[sales_col]][(nrow(train_df) - season + 1):nrow(train_df)]
+
+naive_forecast <- rep(naive_forecast, length.out = nrow(val_df))
+
+# RMSE for naive seasonal forecast
+naive_rmse_shrimp <- sqrt(mean((val_df[[sales_col]] - naive_forecast)^2))
+cat("RMSE for Naive Seasonal Forecasting Shrimp:", naive_rmse_shrimp, "\n")
+
+```
+
+# TOMATO
+
+## Bayesian Forecasting
+
+```{r}
+# updates sales col as tomato sales
+sales_col <- "TomatoSales"
+
+# get train and validation set for tomatoes
+y_train <- train_df[[sales_col]]
+y_val <- val_df[[sales_col]]
+```
+
+```{r}
+# prep data for stan modeling requirements
+stan_data_train <- list(
+  N = N_train,
+  N_forecast = N_val,
+  K_dow = 7,
+  dow = dow_train,
+  dow_forecast = dow_val,
+  y = y_train,
+  t = t_train_scaled,
+  t_forecast = t_val_scaled,
+  S = S,
+  fourier_terms = as.matrix(fourier_train),
+  fourier_terms_forecast = as.matrix(fourier_val)
+)
+
+```
+
+```{r, include=FALSE}
+
+fit <- stan(
+  file = stan_model_path,
+  data = stan_data_train,
+  iter = 4000,
+  chains = 4,
+  seed = 123,
+  verbose = TRUE
+)
+
+```
+
+```{r}
+# get posterior samples
+posterior <- rstan::extract(fit)
+
+# get predictions for validation
+y_pred <- posterior$y_pred 
+
+```
+
+```{r}
+# summarize predictions
+val_mean <- apply(y_pred, 2, mean)
+val_sd <- apply(y_pred, 2, sd)
+val_intervals <- apply(y_pred, 2, quantile, probs = c(0.025, 0.975))
+
+```
+
+```{r}
+val_df <- val_df %>%
+  mutate(
+    Predicted = val_mean,
+    Lower_95_CI = val_intervals[1, ],
+    Upper_95_CI = val_intervals[2, ],
+    Error = Predicted - !!sym(sales_col),
+    Absolute_Error = abs(Error),
+    Squared_Error = Error^2
+  )
+
+```
+
+## Validation Metrics
+
+```{r}
+# validation metrics
+mae_tomato <- mean(val_df$Absolute_Error)
+rmse_tomato <- sqrt(mean(val_df$Squared_Error))
+
+cat("Validation MAE (Tomatoes):", mae_tomato, "\n")
+cat("Validation RMSE (Tomatoes):", rmse_tomato, "\n")
+
+```
+
+## Bayesian Forecast
+
+```{r}
+# observed data for last 30 days of dataset
+observed_data <- train_df %>%
+  slice_tail(n = 30) %>%
+  mutate(
+    Type = "Observed",
+    Predicted = !!sym("TomatoSales"),
+    Lower_95_CI = NA,
+    Upper_95_CI = NA
+  )
+
+# posterior predictive summaries
+val_mean <- apply(y_pred, 2, mean)
+val_intervals <- apply(y_pred, 2, quantile, probs = c(0.025, 0.975))
+
+
+predicted_data <- tibble(
+  Date = val_df$Date[1:10], 
+  Type = "Predicted",
+  Predicted = val_mean[1:10],  # only predicting first 10
+  Lower_95_CI = val_intervals[1, 1:10],  # lb ci
+  Upper_95_CI = val_intervals[2, 1:10]   # ub ci
+)
+
+combined_data <- bind_rows(observed_data, predicted_data)
+
+# plot predicted data with confidence intervals
+ggplot(combined_data, aes(x = Date)) +
+  geom_line(aes(y = Predicted, color = Type)) +  
+  geom_ribbon(
+    data = filter(combined_data, Type == "Predicted"),
+    aes(ymin = Lower_95_CI, ymax = Upper_95_CI),
+    fill = "red", alpha = 0.2
+  ) +
+  labs(
+    title = "Forecast for Tomato Sales Units",
+    x = "Date",
+    y = "Sales Units"
+  ) +
+  scale_color_manual(
+    values = c("Observed" = "black", "Predicted" = "blue"),
+    breaks = c("Observed", "Predicted")
+  ) +
+  theme_minimal()
+
+```
+
+## Naive Forecasting
+
+```{r}
+naive_forecast <- train_df[[sales_col]][(nrow(train_df) - season + 1):nrow(train_df)] 
+naive_forecast <- rep(naive_forecast, length.out = nrow(val_df)) #match only validation set length
+
+# rmse for seasonal naive
+naive_rmse_tomato <- sqrt(mean((val_df[[sales_col]] - naive_forecast)^2))
+cat("RMSE for Naive Seasonal Forecasting (Tomatoes):", naive_rmse_tomato, "\n")
+
+```
+
+# STEAK
+
+## Bayesian Forecasting
+
+```{r}
+
+sales_col <- "SteakSales"
+
+y_train <- train_df[[sales_col]]
+y_val <- val_df[[sales_col]]
+
+```
+
+```{r}
+# prep data to fit requirements of stan file
+stan_data_train <- list(
+  N = N_train,
+  N_forecast = N_val,
+  K_dow = 7,
+  dow = dow_train,
+  dow_forecast = dow_val,
+  y = y_train,
+  t = t_train_scaled,
+  t_forecast = t_val_scaled,
+  S = S,
+  fourier_terms = as.matrix(fourier_train),
+  fourier_terms_forecast = as.matrix(fourier_val)
+)
+
+```
+
+```{r, include = FALSE}
+# fit model for steak
+fit <- stan(
+  file = stan_model_path,
+  data = stan_data_train,
+  iter = 4000,
+  chains = 4,
+  seed = 123,
+  verbose = TRUE
+)
+
+```
+
+```{r}
+# get posterior samples
+posterior <- rstan::extract(fit)
+
+
+y_pred <- posterior$y_pred 
+
+```
+
+```{r}
+# summarize predictions
+val_mean <- apply(y_pred, 2, mean)
+val_sd <- apply(y_pred, 2, sd)
+val_intervals <- apply(y_pred, 2, quantile, probs = c(0.025, 0.975))
+```
+
+```{r}
+# validation results
+val_df <- val_df %>%
+  mutate(
+    Predicted = val_mean,
+    Lower_95_CI = val_intervals[1, ],
+    Upper_95_CI = val_intervals[2, ],
+    Error = Predicted - !!sym(sales_col),
+    Absolute_Error = abs(Error),
+    Squared_Error = Error^2
+  )
+```
+
+## Validation Metrics
+
+```{r}
+# calc validation metrics
+mae_steak <- mean(val_df$Absolute_Error)
+rmse_steak <- sqrt(mean(val_df$Squared_Error))
+
+cat("Validation MAE (Steak):", mae_steak, "\n")
+cat("Validation RMSE (Steak):", rmse_steak, "\n")
+
+```
+
+## Bayesian Forecast
+
+```{r}
+
+# last 30 days only 
+observed_data <- train_df %>%
+  slice_tail(n = 30) %>%
+  mutate(
+    Type = "Observed",
+    Predicted = !!sym("SteakSales"),
+    Lower_95_CI = NA,
+    Upper_95_CI = NA
+  )
+
+val_mean <- apply(y_pred, 2, mean)
+val_intervals <- apply(y_pred, 2, quantile, probs = c(0.025, 0.975)) #confidence interval
+
+
+predicted_data <- tibble(
+  Date = val_df$Date[1:10], 
+  Type = "Predicted",
+  Predicted = val_mean[1:10], # first 10 predictions 
+  Lower_95_CI = val_intervals[1, 1:10],  #ci lb
+  Upper_95_CI = val_intervals[2, 1:10]   #ci ub
+)
+
+combined_data <- bind_rows(observed_data, predicted_data)
+
+# plot observed data and predicted data with confidence intervals
+ggplot(combined_data, aes(x = Date)) +
+  geom_line(aes(y = Predicted, color = Type)) +  
+  geom_ribbon(
+    data = filter(combined_data, Type == "Predicted"),
+    aes(ymin = Lower_95_CI, ymax = Upper_95_CI),
+    fill = "red", alpha = 0.2
+  ) +
+  labs(
+    title = "Forecast for Steak Sales Units",
+    x = "Date",
+    y = "Sales Units"
+  ) +
+  scale_color_manual(
+    values = c("Observed" = "black", "Predicted" = "blue"),
+    breaks = c("Observed", "Predicted")
+  ) +
+  theme_minimal()
+
+```
+
+## Naive Forecasting
+
+```{r}
+# Naive forecasting
+naive_forecast <- train_df[[sales_col]][(nrow(train_df) - season + 1):nrow(train_df)] 
+
+# Repeat the naive forecast to match the validation set length
+naive_forecast <- rep(naive_forecast, length.out = nrow(val_df))
+
+# Calculate RMSE for Naive Seasonal Forecast
+naive_rmse_steak <- sqrt(mean((val_df[[sales_col]] - naive_forecast)^2))
+cat("RMSE for Naive Seasonal Forecasting (Steak):", naive_rmse_steak, "\n")
+
+```
+
+# Comparison
+
+## Compare RMSE Among Items
+
+```{r}
+# df with rmse values
+rmse_data <- data.frame(
+  Variable = c("ShrimpSales", "SteakSales", "TomatoSales"),  
+  RMSE = c(rmse_shrimp, rmse_steak, rmse_tomato)  
+)
+
+# bar plot of rmse for all 3 items 
+ggplot(rmse_data, aes(x = Variable, y = RMSE)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black", width = 0.6) + 
+  labs(title = "Comparison of RMSE Values", 
+       x = "Variable", 
+       y = "RMSE") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14), 
+    plot.title = element_text(hjust = 0.5) 
+  )
+
+```
+
+## Compare Bayesian and Naive RMSE
+
+```{r}
+#df of rmse values
+rmse_data <- tibble(
+  Ingredient = c("Shrimp", "Shrimp", "Steak", "Steak", "Tomato", "Tomato"),
+  Model = c("Bayesian", "Naive Seasonal", "Bayesian", "Naive Seasonal", "Bayesian", "Naive Seasonal"),
+  RMSE = c(rmse_shrimp, naive_rmse_shrimp, rmse_steak, naive_rmse_steak, rmse_tomato, naive_rmse_tomato)
+)
+
+# grouped bar chart of bayesian modeling rmse and naive rmse
+ggplot(rmse_data, aes(x = Ingredient, y = RMSE, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +  
+  labs(
+    title = "RMSE Comparison of Bayesian and Naive Seasonal Models",
+    x = "Ingredient",
+    y = "RMSE"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = c("Bayesian" = "pink", "Naive Seasonal" = "purple")) +
+  theme(
+    text = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+```
