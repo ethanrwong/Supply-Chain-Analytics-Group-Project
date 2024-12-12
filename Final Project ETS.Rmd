@@ -176,6 +176,21 @@ forecasts_steak <- best_model_steak %>%
 forecasts_tomato <- best_model_tomato %>% 
   forecast(new_data = test %>% 
              filter(Ingredient == "Tomato"))
+
+all_forecasts <- bind_rows(
+  forecasts_shrimp %>% mutate(Ingredient = "Shrimp"),
+  forecasts_steak %>% mutate(Ingredient = "Steak"),
+  forecasts_tomato %>% mutate(Ingredient = "Tomato")
+) %>%
+  as_tibble() %>% # Convert to tibble for safer manipulation
+  select(Date, Ingredient, .mean) %>% 
+  rename(Forecasted_Sales_Units = .mean)
+
+# Left Join to original, unsplit dataset
+forecast_test <- df %>%
+  left_join(all_forecasts, by = c("Date", "Ingredient"), suffix = c("", ".forecast")) %>%
+  mutate(Residuals_Squared = (Sales_Units - Forecasted_Sales_Units)^2) %>%
+  as_tsibble(index = Date, key = Ingredient)
 ```
 
 
@@ -199,22 +214,56 @@ print(accuracy_tomato)
 ```
 
 
-```{r}
-all_forecasts <- bind_rows(
-  forecasts_shrimp %>% mutate(Ingredient = "Shrimp"),
-  forecasts_steak %>% mutate(Ingredient = "Steak"),
-  forecasts_tomato %>% mutate(Ingredient = "Tomato")
-) %>%
-  as_tibble() %>% # Convert to tibble for safer manipulation
-  select(Date, Ingredient, .mean) %>% 
-  rename(Forecasted_Sales_Units = .mean)
 
-# Perform the left join
-forecast_test <- df %>%
-  left_join(all_forecasts, by = c("Date", "Ingredient"), suffix = c("", ".forecast")) %>%
-  mutate(Residuals_Squared = (Sales_Units - Forecasted_Sales_Units)^2) %>%
-  as_tsibble(index = Date, key = Ingredient)
+```{r}
+# Extract RMSE values and create a data frame for plotting
+rmse_data <- data.frame(
+  Ingredient = c("Shrimp", "Steak", "Tomato"),
+  RMSE = c(accuracy_shrimp$RMSE, accuracy_steak$RMSE, accuracy_tomato$RMSE)
+)
+
+
+# Create the bar plot
+ggplot(rmse_data, aes(x = Ingredient, y = RMSE, fill = Ingredient)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = round(RMSE, 2), y = 0), vjust = -0.5, position = position_dodge(width = 0.8), size = 5) +
+  theme_minimal() +
+  labs(
+    title = "Comparison of RMSE Values",
+    x = "Ingredient",
+    y = "RMSE"
+  ) +
+  theme(
+    axis.text.x = element_text(hjust = 0.5),
+    legend.position = "none"
+  )
+
+
+
+
+# Extract RMSE values and create a data frame for plotting
+mae_data <- data.frame(
+  Ingredient = c("Shrimp", "Steak", "Tomato"),
+  MAE = c(accuracy_shrimp$MAE, accuracy_steak$MAE, accuracy_tomato$MAE)
+)
+
+# Create the bar plot
+ggplot(mae_data, aes(x = Ingredient, y = MAE, fill = Ingredient)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = round(MAE, 2), y = 0), vjust = -0.5, position = position_dodge(width = 0.8), size = 5) +
+  theme_minimal() +
+  labs(
+    title = "Comparison of MAE Values",
+    x = "Ingredient",
+    y = "MAE"
+  ) +
+  theme(
+    axis.text.x = element_text(hjust = 0.5),
+    legend.position = "none"
+  )
+
 ```
+
 
 
 ```{r}
@@ -252,29 +301,6 @@ rmse_results <- rmse_results %>%
 
 # Display RMSE results
 rmse_results
-
-```
-
-
-```{r}
-# Filter the RMSE results for the 4-month period
-rmse_4_months <- rmse_results %>%
-  filter(Period == "4 months")
-
-# Create the bar plot
-ggplot(rmse_4_months, aes(x = Ingredient, y = RMSE, fill = Ingredient)) +
-  geom_bar(stat = "identity") +
-  geom_text(aes(label = round(RMSE, 1), y = 0), vjust = -0.5, position = position_dodge(width = 0.8), size = 5) +
-  theme_minimal() +
-  labs(
-    title = "RMSE Forecasting May-August 2024 by Ingredient",
-    x = "Ingredient",
-    y = "RMSE"
-  ) +
-  theme(
-    axis.text.x = element_text(hjust = 0.5),
-    legend.position = "none"
-  )
 
 ```
 
@@ -320,7 +346,7 @@ forecasted_data <- forecast_test %>%
   select(Date, Sales_Units, Forecasted_Sales_Units, Residuals_Squared) %>%
   mutate(
     Type = "Predicted",
-    Lower_95_CI = Forecasted_Sales_Units - 1.96 * sqrt(Residuals_Squared),
+    Lower_95_CI = pmax(0, Forecasted_Sales_Units - 1.96 * sqrt(Residuals_Squared)),
     Upper_95_CI = Forecasted_Sales_Units + 1.96 * sqrt(Residuals_Squared)
   ) %>%
   rename(Predicted = Forecasted_Sales_Units)
@@ -342,7 +368,7 @@ ggplot(combined_data, aes(x = Date, y = Predicted, color = Type)) +
     y = "Sales Units"
   ) +
   scale_color_manual(
-    values = c("Observed" = "black", "Predicted" = "blue"),
+    values = c("Observed" = "darkgray", "Predicted" = "blue"),
     breaks = c("Observed", "Predicted")
   ) +
   theme_minimal() +
@@ -389,12 +415,12 @@ ingredient_plots <- forecasted_data %>%
   map(~ ggplot(.x, aes(x = Date)) +
         geom_line(aes(y = Sales_Units, color = "Actual")) +
         geom_line(aes(y = Predicted, color = "Predicted")) +
-        geom_ribbon(
-          aes(ymin = Lower_95_CI, ymax = Upper_95_CI),
-          fill = "lightgray", alpha = 0.2, color = NA
-        ) +
+        # geom_ribbon(
+        #   aes(ymin = Lower_95_CI, ymax = Upper_95_CI),
+        #   fill = "gray", alpha = 0.2, color = NA
+        # ) +
         labs(
-          title = paste("Validation: Actual vs Predicted Sales for", unique(.x$Ingredient)),
+          title = paste("Actual vs Predicted Sales for", unique(.x$Ingredient), ", 5/1/2024 - 5/14/2024"),
           x = "Date",
           y = "Sales Units"
         ) +
@@ -409,15 +435,29 @@ ingredient_plots
 ```
 
 
-```{r fig.width=8, fig.height=4}
+```{r}
+ci_range <- forecasted_data %>%
+  as_tibble() %>%  # Convert to a regular tibble
+  mutate(CI_Range = Upper_95_CI - Lower_95_CI) %>%
+  group_by(Ingredient) %>%
+  summarize(
+    Min_CI_Range = min(CI_Range, na.rm = TRUE),
+    Max_CI_Range = max(CI_Range, na.rm = TRUE),
+    .groups = "drop"  # Explicitly drop groups
+  )
+
+print(ci_range)
+```
+
+
+```{r fig.width=10, fig.height=4}
 # May - August Forecast
 
 forecasted_data2 <- forecast_test %>%
   filter(Date >= as.Date("2024-05-01")) %>%
-  select(Date, Sales_Units, Forecasted_Sales_Units, Residuals_Squared) %>%
   mutate(
     Type = "Predicted",
-    Lower_95_CI = Forecasted_Sales_Units - 1.96 * sqrt(Residuals_Squared),
+    Lower_95_CI = pmax(0, Forecasted_Sales_Units - 1.96 * sqrt(Residuals_Squared)),
     Upper_95_CI = Forecasted_Sales_Units + 1.96 * sqrt(Residuals_Squared)
   ) %>%
   rename(Predicted = Forecasted_Sales_Units)
@@ -430,10 +470,10 @@ ingredient_plots2 <- forecasted_data2 %>%
         geom_line(aes(y = Predicted, color = "Predicted")) +
         geom_ribbon(
           aes(ymin = Lower_95_CI, ymax = Upper_95_CI),
-          fill = "lightgray", alpha = 0.2, color = NA
+          fill = "darkgray", alpha = 0.2, color = NA
         ) +
         labs(
-          title = paste("Validation: Actual vs Predicted Sales for", unique(.x$Ingredient)),
+          title = paste("Actual vs Predicted Sales for", unique(.x$Ingredient), "5/1/2024 - 8/31/2024"),
           x = "Date",
           y = "Sales Units"
         ) +
@@ -445,5 +485,95 @@ ingredient_plots2 <- forecasted_data2 %>%
 
 # Display plots
 ingredient_plots2
+```
+
+```{r}
+ci_range2 <- forecasted_data2 %>%
+  as_tibble() %>%  # Convert to a regular tibble
+  mutate(CI_Range = Upper_95_CI - Lower_95_CI) %>%
+  group_by(Ingredient) %>%
+  summarize(
+    Min_CI_Range = min(CI_Range, na.rm = TRUE),
+    Max_CI_Range = max(CI_Range, na.rm = TRUE),
+    .groups = "drop"  # Explicitly drop groups
+  )
+
+print(ci_range2)
+
+```
+
+## Comparing with Naive Seasonal Model
+
+```{r}
+# Define a function to compare AutoSARIMA with Naive Seasonal Forecasting
+compare_models_with_accuracy <- function(data, ingredient) {
+  # Filter data for the specific ingredient
+  ingredient_data <- data %>%
+    filter(Ingredient == !!ingredient)
+  
+  # Use stretch_tsibble for time-series cross-validation
+  cv_data <- ingredient_data %>%
+    stretch_tsibble(.init = 426, .step = 7)
+  
+  # Fit Auto SARIMA model and Seasonal Naive model
+  naive_models <- cv_data %>%
+    model(SeasonalNaive = SNAIVE(Sales_Units ~ lag("week")))
+  
+  # Generate forecasts for both models
+  cv_forecasts <- naive_models %>%
+    forecast(h = 14)
+  
+  # Align actual data and compute accuracy
+  accuracy_metrics <- cv_forecasts %>%
+    accuracy(ingredient_data) %>%
+    mutate(Ingredient = !!ingredient)
+    
+  return(list(forecasts = cv_forecasts, accuracy = accuracy_metrics))
+}
+
+
+# Initialize lists to store results for all ingredients
+naive_forecasts <- list()
+naive_accuracy_metrics <- tibble()
+
+naive_shrimp <- compare_models_with_accuracy(tsibble, "Shrimp")
+naive_forecasts$Shrimp <- naive_shrimp$forecasts
+naive_accuracy_metrics <- bind_rows(naive_accuracy_metrics, naive_shrimp$accuracy)
+
+naive_steak <- compare_models_with_accuracy(tsibble, "Steak")
+naive_forecasts$Steak <- naive_steak$forecasts
+naive_accuracy_metrics <- bind_rows(naive_accuracy_metrics, naive_steak$accuracy)
+
+naive_tomato <- compare_models_with_accuracy(tsibble, "Tomato")
+naive_forecasts$Shrimp <- naive_tomato$forecasts
+naive_accuracy_metrics <- bind_rows(naive_accuracy_metrics, naive_tomato$accuracy)
+
+```
+
+```{r}
+# Combine Naive and ETS RMSE data into a single data frame
+comparison_rmse <- data.frame(
+  Ingredient = rep(c("Shrimp", "Steak", "Tomato"), each = 2),
+  Model = rep(c("Naive", "ETS"), times = 3),
+  RMSE = c(
+    naive_accuracy_metrics %>% filter(Ingredient == "Shrimp") %>% pull(RMSE),
+    accuracy_shrimp$RMSE,
+    naive_accuracy_metrics %>% filter(Ingredient == "Steak") %>% pull(RMSE),
+    accuracy_steak$RMSE,
+    naive_accuracy_metrics %>% filter(Ingredient == "Tomato") %>% pull(RMSE),
+    accuracy_tomato$RMSE
+  )
+)
+
+# Create the bar plot
+ggplot(comparison_rmse, aes(x = Ingredient, y = RMSE, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") +
+  theme_minimal() +
+  labs(
+    title = "RMSE Comparison of Naive Seasonal Models and ETS Models",
+    x = "Ingredient",
+    y = "RMSE"
+  ) 
+
 ```
 
