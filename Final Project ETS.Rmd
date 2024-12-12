@@ -1,0 +1,449 @@
+---
+title: "Final Project ETS"
+author: "Carissa Ing"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r warning=FALSE, message=FALSE}
+
+library(fpp3)
+library(tsibble)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+
+```
+
+## Data Setup
+
+```{r}
+# Load datasets
+df <- read.csv("data_formatted.csv") %>% mutate(Date = as.Date(Date))
+
+data_incl_sunday <- df %>% select(-Day_of_Week)
+
+```
+
+```{r}
+# Convert to tsibble
+tsibble <- data_incl_sunday %>% 
+  mutate(Date = as_date(Date)) %>% 
+  as_tsibble(index = Date, key = Ingredient)
+
+# Split into training (2023) and testing (2024) datasets
+train <- tsibble %>% filter(Date < as.Date("2024-05-01"))
+test <- tsibble %>% filter(Date >= as.Date("2024-05-01"))
+```
+
+
+## Auto-Selected ETS Models
+
+```{r }
+# Fit ETS models separately for each ingredient for datasets including Sundays
+m_shrimp <- train %>% 
+  filter(Ingredient == "Shrimp") %>% 
+  model(m.auto = ETS(Sales_Units))
+
+m_steak <- train %>% 
+  filter(Ingredient == "Steak") %>% 
+  model(m.auto = ETS(Sales_Units))
+
+m_tomato <- train %>% 
+  filter(Ingredient == "Tomato") %>% 
+  model(m.auto = ETS(Sales_Units))
+```
+
+
+```{r}
+m_shrimp %>% 
+  components() %>%
+  autoplot()
+
+m_steak %>% 
+  components() %>%
+  autoplot()
+
+m_tomato %>% 
+  components() %>%
+  autoplot()
+```
+
+## Testing Different Models
+
+```{r}
+m_shrimp <- train %>% 
+  filter(Ingredient == "Shrimp") %>% 
+  model(m.auto = ETS(Sales_Units),
+        m.ANA = ETS(Sales_Units ~ error("A") + trend("N") + season("A")),
+        m.ANM = ETS(Sales_Units ~ error("A") + trend("N") + season("M")),
+        m.MNM = ETS(Sales_Units ~ error("M") + trend("N") + season("M")),
+        m.AAA = ETS(Sales_Units ~ error("A") + trend("A") + season("A")),
+        m.MAA = ETS(Sales_Units ~ error("M") + trend("A") + season("A")),
+        m.ZAZ = ETS(Sales_Units ~ trend("A")),
+        m.ZMZ = ETS(Sales_Units ~ trend("M")))
+
+m_steak <- train %>% 
+  filter(Ingredient == "Steak") %>% 
+  model(m.auto = ETS(Sales_Units),
+        m.ANA = ETS(Sales_Units ~ error("A") + trend("N") + season("A")),
+        m.ANM = ETS(Sales_Units ~ error("A") + trend("N") + season("M")),
+        m.AAA = ETS(Sales_Units ~ error("A") + trend("A") + season("A")),
+        m.MAA = ETS(Sales_Units ~ error("M") + trend("A") + season("A")),
+        m.ZAZ = ETS(Sales_Units ~ trend("A")))
+
+m_tomato <- train %>% 
+  filter(Ingredient == "Tomato") %>% 
+  model(m.auto = ETS(Sales_Units),
+        m.ANA = ETS(Sales_Units ~ error("A") + trend("N") + season("A")),
+        m.ANM = ETS(Sales_Units ~ error("A") + trend("N") + season("M")),
+        m.AAA = ETS(Sales_Units ~ error("A") + trend("A") + season("A")),
+        m.MAA = ETS(Sales_Units ~ error("M") + trend("A") + season("A")),
+        m.ZAZ = ETS(Sales_Units ~ trend("A")))
+```
+
+```{r}
+m_shrimp %>% glance()
+
+m_steak %>% glance()
+
+m_tomato %>% glance()
+```
+
+
+```{r}
+# Extract AICc values from models
+shrimp_aicc <- m_shrimp %>% glance() %>% mutate(Ingredient = "Shrimp")
+steak_aicc <- m_steak %>% glance() %>% mutate(Ingredient = "Steak")
+tomato_aicc <- m_tomato %>% glance() %>% mutate(Ingredient = "Tomato")
+
+# Combine data
+aicc_data <- bind_rows(shrimp_aicc, steak_aicc, tomato_aicc) %>%
+  select(Ingredient, .model, AICc) %>%
+  mutate(
+    Model = gsub("m\\.", "", .model), # Simplify model names
+    AICc = round(AICc)               # Round AICc values
+  )
+
+# Create facet bar plot with value labels
+ggplot(aicc_data, aes(x = Model, y = AICc, fill = Model)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = AICc), vjust = -0.3, size = 3) + # Add rounded AICc labels above bars
+  facet_wrap(~ Ingredient, scales = "free") +
+  labs(
+    title = "Comparison of Models by AICc",
+    x = "Model",
+    y = "AICc"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none" # Remove legend for model colors
+  )
+```
+
+
+```{r}
+# Identify the best model for Shrimp based on AICc
+best_model_shrimp <- train %>% 
+  filter(Ingredient == "Shrimp") %>% 
+  model(m.MNM = ETS(Sales_Units ~ error("M") + trend("N") + season("M")))
+
+# Identify the best model for Steak based on AICc
+best_model_steak <- train %>% 
+  filter(Ingredient == "Steak") %>% 
+  model(m.MAA = ETS(Sales_Units ~ error("M") + trend("A") + season("A")))
+
+# Identify the best model for Tomato based on AICc
+best_model_tomato <- train %>% 
+  filter(Ingredient == "Tomato") %>% 
+  model(m.ANA = ETS(Sales_Units ~ error("A") + trend("N") + season("A")))
+```
+
+
+## Forecasting 2024 & Accuracy Results
+
+```{r}
+# Generate forecasts for test sets
+forecasts_shrimp <- best_model_shrimp %>% 
+  forecast(new_data = test %>% 
+             filter(Ingredient == "Shrimp"))
+
+forecasts_steak <- best_model_steak %>% 
+  forecast(new_data = test %>% 
+             filter(Ingredient == "Steak"))
+
+forecasts_tomato <- best_model_tomato %>% 
+  forecast(new_data = test %>% 
+             filter(Ingredient == "Tomato"))
+```
+
+
+```{r}
+# Compare forecasted vs actual accuracy for 2024 
+accuracy_shrimp <- forecasts_shrimp %>% 
+  accuracy(data = test %>% 
+             filter(Ingredient == "Shrimp"))
+
+accuracy_steak <- forecasts_steak %>% 
+  accuracy(data = test %>% 
+             filter(Ingredient == "Steak"))
+
+accuracy_tomato <- forecasts_tomato %>% 
+  accuracy(data = test %>% 
+             filter(Ingredient == "Tomato"))
+
+print(accuracy_shrimp)
+print(accuracy_steak)
+print(accuracy_tomato)
+```
+
+
+```{r}
+all_forecasts <- bind_rows(
+  forecasts_shrimp %>% mutate(Ingredient = "Shrimp"),
+  forecasts_steak %>% mutate(Ingredient = "Steak"),
+  forecasts_tomato %>% mutate(Ingredient = "Tomato")
+) %>%
+  as_tibble() %>% # Convert to tibble for safer manipulation
+  select(Date, Ingredient, .mean) %>% 
+  rename(Forecasted_Sales_Units = .mean)
+
+# Perform the left join
+forecast_test <- df %>%
+  left_join(all_forecasts, by = c("Date", "Ingredient"), suffix = c("", ".forecast")) %>%
+  mutate(Residuals_Squared = (Sales_Units - Forecasted_Sales_Units)^2) %>%
+  as_tsibble(index = Date, key = Ingredient)
+```
+
+
+```{r}
+# RMSE for different periods of forecasted time
+
+# Function to calculate RMSE over different periods
+calculate_rmse <- function(data, start_date, periods) {
+  map_dfr(periods, function(period) {
+    end_date <- as.Date(start_date) + period
+    data_filtered <- data %>%
+      filter(Date >= as.Date(start_date) & Date <= end_date)
+    
+    rmse <- sqrt(mean(data_filtered$Residuals_Squared, na.rm = TRUE))
+    
+    tibble(
+      Ingredient = unique(data_filtered$Ingredient),
+      Period = paste(period, "days"),
+      RMSE = rmse
+    )
+  })
+}
+
+# Calculate RMSE for each ingredient over specified periods
+periods <- c(7, 14, 30, 60, 90, 120)  # Days for 1 week, 2 weeks, 1 month, etc.
+rmse_results <- forecast_test %>%
+  filter(Date >= as.Date("2024-05-01")) %>%
+  split(.$Ingredient) %>%
+  map_dfr(~ calculate_rmse(.x, "2024-05-01", periods))
+
+rmse_results <- rmse_results %>%
+  mutate(
+    Period = factor(Period, levels = c("7 days", "14 days", "30 days", "60 days", "90 days", "120 days"),
+                    labels = c("1 week", "2 weeks", "1 month", "2 months", "3 months", "4 months"))
+  )
+
+# Display RMSE results
+rmse_results
+
+```
+
+
+```{r}
+# Filter the RMSE results for the 4-month period
+rmse_4_months <- rmse_results %>%
+  filter(Period == "4 months")
+
+# Create the bar plot
+ggplot(rmse_4_months, aes(x = Ingredient, y = RMSE, fill = Ingredient)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = round(RMSE, 1), y = 0), vjust = -0.5, position = position_dodge(width = 0.8), size = 5) +
+  theme_minimal() +
+  labs(
+    title = "RMSE Forecasting May-August 2024 by Ingredient",
+    x = "Ingredient",
+    y = "RMSE"
+  ) +
+  theme(
+    axis.text.x = element_text(hjust = 0.5),
+    legend.position = "none"
+  )
+
+```
+
+
+```{r fig.width=10, fig.height=6}
+# Create bar graph for RMSE values with labels
+ggplot(rmse_results, aes(x = Period, y = RMSE, fill = Ingredient)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), color = "black") +
+  geom_text(aes(label = round(RMSE, 1), y = 0), vjust = -0.5, position = position_dodge(width = 0.8), size = 3) +
+  facet_wrap(~ Ingredient, scales = "free", ncol = 2) +
+  labs(
+    title = "RMSE Over Different Forecasted Periods",
+    x = "Time Period",
+    y = "RMSE",
+    fill = "Ingredient"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+
+## Plotting 14-Day Forecast
+
+
+```{r fig.width=10, fig.height=6}
+# Example observed data for April
+observed_data <- train %>%
+  filter(Date >= as.Date("2024-04-01") & Date < as.Date("2024-05-01")) %>%
+  select(Date, Sales_Units) %>%
+  mutate(
+    Type = "Observed",
+    Lower_95_CI = NA,
+    Upper_95_CI = NA
+  ) %>%
+  rename(Predicted = Sales_Units)
+
+# Forecasted data for May from forecast_test
+forecasted_data <- forecast_test %>%
+  filter(Date >= as.Date("2024-05-01") & Date <= as.Date("2024-05-14")) %>%
+  select(Date, Sales_Units, Forecasted_Sales_Units, Residuals_Squared) %>%
+  mutate(
+    Type = "Predicted",
+    Lower_95_CI = Forecasted_Sales_Units - 1.96 * sqrt(Residuals_Squared),
+    Upper_95_CI = Forecasted_Sales_Units + 1.96 * sqrt(Residuals_Squared)
+  ) %>%
+  rename(Predicted = Forecasted_Sales_Units)
+
+# Combine observed and forecasted data
+combined_data <- bind_rows(observed_data, forecasted_data)
+
+# Plot observed data and predicted data with confidence intervals
+ggplot(combined_data, aes(x = Date, y = Predicted, color = Type)) +
+  geom_line() +
+  geom_ribbon(
+    data = filter(combined_data, Type == "Predicted"),
+    aes(ymin = Lower_95_CI, ymax = Upper_95_CI),
+    fill = "red", alpha = 0.2, color = NA
+  ) +
+  labs(
+    title = "Observed and Forecasted Sales Units",
+    x = "Date",
+    y = "Sales Units"
+  ) +
+  scale_color_manual(
+    values = c("Observed" = "black", "Predicted" = "blue"),
+    breaks = c("Observed", "Predicted")
+  ) +
+  theme_minimal() +
+  facet_wrap(~ Ingredient, ncol = 1, scales = "free_y")
+
+```
+
+
+```{r}
+# Create separate plots for each Ingredient
+plots <- combined_data %>%
+  split(.$Ingredient) %>%
+  map(~ ggplot(.x, aes(x = Date, y = Predicted, color = Type)) +
+        geom_line() +
+        geom_ribbon(
+          data = filter(.x, Type == "Predicted"),
+          aes(ymin = Lower_95_CI, ymax = Upper_95_CI),
+          fill = "red", alpha = 0.2, color = NA
+        ) +
+        labs(
+          title = paste("Observed and Forecasted Sales Units for", unique(.x$Ingredient)),
+          x = "Date",
+          y = "Sales Units"
+        ) +
+        scale_color_manual(
+          values = c("Observed" = "black", "Predicted" = "blue"),
+          breaks = c("Observed", "Predicted")
+        ) +
+        theme_minimal())
+
+# Display plots
+plots
+
+```
+
+## Comparing Forecast to Actual Sales
+
+```{r fig.width=8, fig.height=4}
+# 14-Day Forecast
+
+# Plot actual vs predicted sales with confidence intervals
+ingredient_plots <- forecasted_data %>%
+  split(.$Ingredient) %>%
+  map(~ ggplot(.x, aes(x = Date)) +
+        geom_line(aes(y = Sales_Units, color = "Actual")) +
+        geom_line(aes(y = Predicted, color = "Predicted")) +
+        geom_ribbon(
+          aes(ymin = Lower_95_CI, ymax = Upper_95_CI),
+          fill = "lightgray", alpha = 0.2, color = NA
+        ) +
+        labs(
+          title = paste("Validation: Actual vs Predicted Sales for", unique(.x$Ingredient)),
+          x = "Date",
+          y = "Sales Units"
+        ) +
+        scale_color_manual(
+          values = c("Actual" = "blue", "Predicted" = "red"),
+          breaks = c("Actual", "Predicted")
+        ) +
+        theme_minimal())
+
+# Display plots
+ingredient_plots
+```
+
+
+```{r fig.width=8, fig.height=4}
+# May - August Forecast
+
+forecasted_data2 <- forecast_test %>%
+  filter(Date >= as.Date("2024-05-01")) %>%
+  select(Date, Sales_Units, Forecasted_Sales_Units, Residuals_Squared) %>%
+  mutate(
+    Type = "Predicted",
+    Lower_95_CI = Forecasted_Sales_Units - 1.96 * sqrt(Residuals_Squared),
+    Upper_95_CI = Forecasted_Sales_Units + 1.96 * sqrt(Residuals_Squared)
+  ) %>%
+  rename(Predicted = Forecasted_Sales_Units)
+
+# Plot actual vs predicted sales with confidence intervals
+ingredient_plots2 <- forecasted_data2 %>%
+  split(.$Ingredient) %>%
+  map(~ ggplot(.x, aes(x = Date)) +
+        geom_line(aes(y = Sales_Units, color = "Actual")) +
+        geom_line(aes(y = Predicted, color = "Predicted")) +
+        geom_ribbon(
+          aes(ymin = Lower_95_CI, ymax = Upper_95_CI),
+          fill = "lightgray", alpha = 0.2, color = NA
+        ) +
+        labs(
+          title = paste("Validation: Actual vs Predicted Sales for", unique(.x$Ingredient)),
+          x = "Date",
+          y = "Sales Units"
+        ) +
+        scale_color_manual(
+          values = c("Actual" = "blue", "Predicted" = "red"),
+          breaks = c("Actual", "Predicted")
+        ) +
+        theme_minimal())
+
+# Display plots
+ingredient_plots2
+```
+
